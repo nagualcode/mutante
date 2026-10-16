@@ -1,0 +1,37 @@
+uuid = "77ff7853-15bc-47b1-89b5-a3b2a0815786"
+name = "12-Stage Series Deep Phase"
+category = "Deep Phase"
+author = "Jardim Sonoro"
+comment = "Signature 12-pole cascade through both optical blocks for maximum comb filtering"
+tags = ["phasor", "cascade", "12-pole"]
+default = false
+
+[params]
+gen_1_rate = 0.18
+gen_1_sync = 0
+gen_1_synced_rate = 0
+gen_1_shape = 0
+gen_1_rate_ctrl = 0
+gen_2_rate = 0.40
+gen_2_sync = 0
+gen_2_synced_rate = 0
+gen_2_shape = 0
+phasor_a_depth = 0.90
+phasor_a_feedback = 0.0
+phasor_a_sweep = 0
+phasor_a_poles = 0
+phasor_a_bypass = 0
+phasor_b_depth = 0.90
+phasor_b_feedback = 0.65
+phasor_b_sweep = 0
+phasor_b_sweep_sync = 0
+phasor_b_poles = 0
+phasor_b_bypass = 0
+pedal_mode = 0
+pedal_manual = 0.5
+pedal_sensitivity = 1.5
+routing = 2
+drive = 0.12
+mix = 1.0
+output_gain = 0.0
+bypass = 0

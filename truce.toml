@@ -1,0 +1,14 @@
+[vendor]
+name = "Jardim Sonoro"
+id = "com.jardimsonoro"
+url = "https://github.com/nagualcode/mutante"
+au_manufacturer = "JSon"
+
+[[plugin]]
+name = "Mutante"
+bundle_id = "mutante"
+crate = "mutante"
+category = "effect"
+fourcc = "Muta"
+au_tag = "Effects"
+vst3_subcategory = "Modulation"
