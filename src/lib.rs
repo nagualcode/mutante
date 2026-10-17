@@ -32,7 +32,7 @@ use circuit::{GEN_TRI_PEAK, R_DEPTH_FLOOR, R_DEPTH_POT, VOLTS_PER_FS};
 pub struct MutanteParams {
     // --- Sweep Generator 1 ---
     #[param(name = "Gen 1 Rate", short_name = "Rate 1", range = "log(0.1, 18.0)",
-            default = 0.4, unit = "Hz", smooth = "exp(30)")]
+            default = 0.4, smooth = "exp(30)")]
     pub gen_1_rate: FloatParam,
 
     #[param(name = "Gen 1 Sync", short_name = "Sync 1", default = false)]
@@ -49,7 +49,7 @@ pub struct MutanteParams {
 
     // --- Sweep Generator 2 ---
     #[param(name = "Gen 2 Rate", short_name = "Rate 2", range = "log(0.1, 18.0)",
-            default = 1.6, unit = "Hz", smooth = "exp(30)")]
+            default = 1.6, smooth = "exp(30)")]
     pub gen_2_rate: FloatParam,
 
     #[param(name = "Gen 2 Sync", short_name = "Sync 2", default = false)]

@@ -308,7 +308,7 @@ fn phasor_response(f: f32, fc: f32, feedback_pos: f32, wet_on: bool, r123: f32) 
     let ap1 = s.scale(1.0 / (two_pi * fc)).sub(Cx::ONE).div(s.scale(1.0 / (two_pi * fc)).add(Cx::ONE));
     let ap2 = ap1.mul(ap1);
     let ap6 = ap2.mul(ap2).mul(ap2);
-    let hp12 = first_order_hp(1.0 / (R_J1_LOAD * C12));
+    let hp12 = first_order_hp(1.0 / (j1_load_resistance(feedback_pos) * C12));
     let (ratio, r_th) = pot_divider(feedback_pos, R_FB_POT);
     let r_src = R7 + r_th;
     let k_fb = ratio * R6 / (R6 + r_src);
@@ -496,6 +496,7 @@ fn knob(
     accent: Color32,
     enabled: bool,
 ) {
+    let is_rate = matches!(id, P::Gen1Rate | P::Gen2Rate);
     let id: u32 = id.into();
     let hit = Rect::from_center_size(c, Vec2::splat(radius * 2.0 + 10.0));
     let resp = ui.interact(hit, egui::Id::new(("knob", id)), Sense::click_and_drag());
@@ -556,7 +557,15 @@ fn knob(
         stroke(2.0, if enabled { TEXT } else { TEXT_DIM }),
     );
 
-    let text = if active { st.format_param(id) } else { label.to_owned() };
+    let text = if active {
+        if is_rate {
+            format!("{} Hz", st.format_param(id))
+        } else {
+            st.format_param(id)
+        }
+    } else {
+        label.to_owned()
+    };
     let col = if active { accent } else { TEXT_DIM };
     p.text(c + vec2(0.0, radius + 6.0), Align2::CENTER_TOP, text, FontId::proportional(10.5), col);
 }

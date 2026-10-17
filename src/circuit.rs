@@ -39,9 +39,11 @@ pub const C_STAGE: f32 = 0.0068e-6;
 // --- Wet coupling and output mixer ----------------------------------------------
 /// C12 / C28: 0.47 µF coupling cap from the last stage to J1-1 / J1-13.
 pub const C12: f32 = 0.47e-6;
-/// Load seen by C12: R133 (10 kΩ to ground) in parallel with R26 (4.7 kΩ into
-/// the Z9B virtual ground).
-pub const R_J1_LOAD: f32 = 10e3 * 4.7e3 / (10e3 + 4.7e3);
+/// R26 / R59: 4.7 kΩ input resistor of the Z9B / Z11B inverting wet amplifier.
+pub const R26: f32 = 4.7e3;
+/// Load seen by C12 at feedback = 0: R133 (10 kΩ to ground) in parallel with
+/// R26 (4.7 kΩ into the Z9B virtual ground).
+pub const R_J1_LOAD: f32 = R_FB_POT * R26 / (R_FB_POT + R26);
 /// C13 across R27 (Z9B): 33.9 kHz roll-off of the re-inverted wet signal.
 pub const C13: f32 = 0.001e-6;
 pub const R27: f32 = 4.7e3;
@@ -134,12 +136,45 @@ pub fn opamp_clip(x: f32) -> f32 {
     x / (1.0 + r2 * r2).sqrt().sqrt()
 }
 
+/// Effective load resistance at J1-1 (seen by coupling capacitor C12 = 0.47 µF)
+/// as a function of the FEEDBACK pot wiper position `p` in [0, 1].
+///
+/// At p = 0 the wiper is grounded and R133 presents its full 10 kΩ in parallel
+/// with R26 (4.7 kΩ) → 3197 Ω (fc ≈ 105.8 Hz). As feedback increases toward
+/// p = 1, the wiper load R7 + R6 (6.2 kΩ + 4.7 kΩ = 10.9 kΩ) pulls the R133
+/// branch down to 10 kΩ ‖ 10.9 kΩ = 5215 Ω, reducing the J1-1 load to 2472 Ω
+/// (fc ≈ 136.8 Hz).
+#[inline]
+pub fn j1_load_resistance(p: f32) -> f32 {
+    let p = p.clamp(0.0, 1.0);
+    let r_wiper_load = R7 + R6;
+    let r_bot = (p * R_FB_POT * r_wiper_load) / (p * R_FB_POT + r_wiper_load);
+    let r_133_eff = (1.0 - p) * R_FB_POT + r_bot;
+    (r_133_eff * R26) / (r_133_eff + R26)
+}
+
+/// TPT one-pole coefficient G = g / (1 + g) for normalized cutoff `w_norm = fc / fs`.
+///
+/// Uses a Padé [3/2] rational approximation of `tan(π · w_norm)` for `w_norm <= 0.25`
+/// (relative error < 2e-5 across the entire Bi-Phase sweep range) and falls back
+/// to exact `tan` near Nyquist.
+#[inline]
+pub fn one_pole_g_norm(w_norm: f32) -> f32 {
+    let w = w_norm.clamp(2.0e-8, 0.49);
+    let theta = std::f32::consts::PI * w;
+    let g = if w <= 0.25 {
+        let t2 = theta * theta;
+        theta * (15.0 - t2) / (15.0 - 6.0 * t2)
+    } else {
+        theta.tan()
+    };
+    g / (1.0 + g)
+}
+
 /// TPT one-pole coefficient G = g / (1 + g) for cutoff `fc` at sample rate `fs`.
 #[inline]
 pub fn one_pole_g(fc: f32, fs: f32) -> f32 {
-    let f = fc.clamp(1.0e-3, 0.49 * fs);
-    let g = (std::f32::consts::PI * f / fs).tan();
-    g / (1.0 + g)
+    one_pole_g_norm(fc / fs)
 }
 
 /// Topology-preserving-transform one-pole low-pass, also used for the

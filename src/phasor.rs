@@ -54,6 +54,7 @@ pub struct PhasorChannel {
     driver: LedDriver,
     stages: [AllpassStage; 6],
     stage_cap: [f32; 6],
+    stage_w_scale: [f32; 6],
     input_hp: OnePole,
     c12: OnePole,
     c5: OnePole,
@@ -87,6 +88,7 @@ impl PhasorChannel {
             driver: LedDriver::new(),
             stages: [AllpassStage::default(); 6],
             stage_cap,
+            stage_w_scale: [0.0; 6],
             input_hp: OnePole::default(),
             c12: OnePole::default(),
             c5: OnePole::default(),
@@ -112,6 +114,9 @@ impl PhasorChannel {
         self.sample_rate = sample_rate;
         self.pod.set_sample_rate(sample_rate);
         self.switch.set_sample_rate(sample_rate);
+        for (w_scale, &cap) in self.stage_w_scale.iter_mut().zip(&self.stage_cap) {
+            *w_scale = 1.0 / (TWO_PI * cap * sample_rate);
+        }
         self.g_input = one_pole_g(1.0 / (TWO_PI * R_IN * C_IN), sample_rate);
         self.g12 = one_pole_g(1.0 / (TWO_PI * R_J1_LOAD * C12), sample_rate);
         self.g13 = one_pole_g(1.0 / (TWO_PI * R27 * C13), sample_rate);
@@ -147,6 +152,8 @@ impl PhasorChannel {
         self.fb_k = ratio * R6 / (R6 + r_src);
         let r_par = R6 * r_src / (R6 + r_src);
         self.fb_g5 = one_pole_g(1.0 / (TWO_PI * r_par * C5), self.sample_rate);
+        let r_j1 = j1_load_resistance(pos);
+        self.g12 = one_pole_g(1.0 / (TWO_PI * r_j1 * C12), self.sample_rate);
     }
 
     #[inline]
@@ -177,8 +184,7 @@ impl PhasorChannel {
         self.pod.tick(self.driver.current_ma(cv));
         let mut g = [0.0f32; 6];
         for (i, gi) in g.iter_mut().enumerate() {
-            let fc = 1.0 / (TWO_PI * self.pod.stage_resistance(i) * self.stage_cap[i]);
-            *gi = one_pole_g(fc, self.sample_rate);
+            *gi = one_pole_g_norm(self.pod.stage_conductance(i) * self.stage_w_scale[i]);
         }
 
         self.update_feedback_network(feedback);
@@ -206,8 +212,8 @@ impl PhasorChannel {
         let w = self.c12.hp(y, g12);
         self.c5.lp(fb_k * w, g5);
 
-        // Z9B re-inverts the wet signal.
-        let wet = -self.c13.lp(w, self.g13);
+        // Z9B re-inverts the wet signal (with 4558 rail limiting).
+        let wet = opamp_clip(-self.c13.lp(w, self.g13));
 
         // PM1 optical switch and the passive R31/R29 mixer into Z9A.
         let r_pm = self.switch.tick(on);
@@ -320,5 +326,13 @@ mod tests {
         // ...while the cells cannot fully darken between fast cycles.
         assert!(fast_lo > 1.5 * slow_lo, "{fast_lo} vs {slow_lo}");
         assert!(fast_hi > 0.8 * slow_hi);
+    }
+
+    #[test]
+    fn feedback_pot_loads_c12_highpass() {
+        let r0 = j1_load_resistance(0.0);
+        let r1 = j1_load_resistance(1.0);
+        assert!((r0 - R_J1_LOAD).abs() < 1.0, "r0 = {r0}");
+        assert!(r1 < r0 * 0.80 && r1 > 2400.0, "r1 = {r1}");
     }
 }
