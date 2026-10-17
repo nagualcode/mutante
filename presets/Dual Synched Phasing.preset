@@ -1,0 +1,35 @@
+uuid = "cbd93459-cee5-510a-a26c-117112c66b8f"
+name = "Dual Synched Phasing"
+category = "Manual Fig. C"
+author = "Jardim Sonoro"
+comment = "Independent inputs, both phasors locked to Gen 1."
+tags = ["stereo", "dual"]
+default = false
+
+[params]
+gen_1_rate = 0.6
+gen_1_sync = 0
+gen_1_synced_rate = 6
+gen_1_shape = 0
+gen_1_rate_ctrl = 0
+gen_2_rate = 1.6
+gen_2_sync = 0
+gen_2_synced_rate = 6
+gen_2_shape = 0
+phasor_a_depth = 9.0
+phasor_a_feedback = 5.0
+phasor_a_sweep = 0
+phasor_a_on = 1
+phasor_b_depth = 6.0
+phasor_b_feedback = 2.0
+phasor_b_sweep = 0
+phasor_b_sweep_sync = 0
+phasor_b_on = 1
+routing = 2
+pedal_position = 0.5
+pedal_mode = 0
+pedal_sensitivity = 2.0
+input_level = 0.0
+mix = 1.0
+output_gain = 0.0
+bypass = 0

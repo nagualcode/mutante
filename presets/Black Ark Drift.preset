@@ -1,0 +1,35 @@
+uuid = "1c000bc4-7ae0-599a-b3a8-c8897388d7de"
+name = "Black Ark Drift"
+category = "Dub"
+author = "Jardim Sonoro"
+comment = "Very slow series sweep with singing feedback, for skanks and melodica."
+tags = ["dub", "series"]
+default = false
+
+[params]
+gen_1_rate = 0.12
+gen_1_sync = 0
+gen_1_synced_rate = 6
+gen_1_shape = 0
+gen_1_rate_ctrl = 0
+gen_2_rate = 0.21
+gen_2_sync = 0
+gen_2_synced_rate = 6
+gen_2_shape = 0
+phasor_a_depth = 9.5
+phasor_a_feedback = 6.5
+phasor_a_sweep = 0
+phasor_a_on = 1
+phasor_b_depth = 7.0
+phasor_b_feedback = 4.0
+phasor_b_sweep = 1
+phasor_b_sweep_sync = 0
+phasor_b_on = 1
+routing = 1
+pedal_position = 0.5
+pedal_mode = 0
+pedal_sensitivity = 2.0
+input_level = 0.0
+mix = 1.0
+output_gain = 0.0
+bypass = 0

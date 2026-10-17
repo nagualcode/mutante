@@ -1,0 +1,35 @@
+uuid = "0600b739-e8f1-5795-a26e-0b5948f4fa85"
+name = "Pedal Wah"
+category = "Manual"
+author = "Jardim Sonoro"
+comment = "Pedal sweep with full feedback, played by the input envelope: the unusual wah-pedal."
+tags = ["pedal", "envelope"]
+default = false
+
+[params]
+gen_1_rate = 0.4
+gen_1_sync = 0
+gen_1_synced_rate = 6
+gen_1_shape = 0
+gen_1_rate_ctrl = 0
+gen_2_rate = 1.6
+gen_2_sync = 0
+gen_2_synced_rate = 6
+gen_2_shape = 0
+phasor_a_depth = 10.0
+phasor_a_feedback = 10.0
+phasor_a_sweep = 1
+phasor_a_on = 1
+phasor_b_depth = 10.0
+phasor_b_feedback = 7.0
+phasor_b_sweep = 2
+phasor_b_sweep_sync = 0
+phasor_b_on = 1
+routing = 1
+pedal_position = 0.5
+pedal_mode = 1
+pedal_sensitivity = 3.0
+input_level = 0.0
+mix = 1.0
+output_gain = 0.0
+bypass = 0

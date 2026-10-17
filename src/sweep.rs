@@ -1,11 +1,21 @@
-//! Mu-Tron Bi-Phase Sweep Generators (LFOs).
+//! Sweep generators 1 and 2.
 //!
-//! Features:
-//! 1. Hardware-calibrated rate range: 0.1 Hz to 18.0 Hz.
-//! 2. Diode-bridge shaped pseudo-sine and bipolar square waveforms.
-//! 3. Host tempo synchronization support with musical subdivisions.
-//! 4. Continuous phase accumulation and anti-pop phase preservation.
+//! Both are classic integrator + Schmitt-trigger oscillators: Gen 1 is
+//! Z12A/Z12B/Z13A/Z13B with a CR2–CR5 diode bridge steering the integrator
+//! current so its rate can be voltage controlled (RATE knob or pedal);
+//! Gen 2 is Z14A/Z14B with the RATE pot dividing the comparator output into
+//! the integrator.
+//!
+//! What the panel calls "sine" is the integrator's triangle, taken straight
+//! from Z13B through R75 (Gen 1) or Z14B (Gen 2). The rounded, sine-like
+//! motion people hear comes later, from the LED driver curve and the
+//! photocells. "Square" is the comparator output smoothed by an RC network
+//! (R76/C36 for Gen 1, R92/C35 for Gen 2), so it jumps between the sweep
+//! extremes with a short exponential glide instead of clicking.
+//!
+//! Outputs are in volts, centred on 0 V.
 
+use crate::circuit::*;
 use truce::prelude::ParamEnum;
 
 #[derive(ParamEnum)]
@@ -18,9 +28,9 @@ pub enum LfoShape {
 
 #[derive(ParamEnum)]
 pub enum RateControl {
-    #[name = "Manual"]
+    #[name = "Man"]
     Manual,
-    #[name = "Pedal"]
+    #[name = "Ped"]
     Pedal,
 }
 
@@ -63,7 +73,7 @@ pub enum SyncRate {
 }
 
 impl SyncRate {
-    /// Returns the number of quarter-note beats for this sync subdivision.
+    /// Number of quarter-note beats per sweep cycle.
     pub fn beats(self) -> f32 {
         match self {
             SyncRate::Bars4 => 16.0,
@@ -83,61 +93,70 @@ impl SyncRate {
     }
 }
 
+/// Which generator circuit this is (they differ in their square networks).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum GenCircuit {
+    Gen1,
+    Gen2,
+}
+
 #[derive(Clone, Copy)]
 pub struct SweepGenerator {
     phase: f32,
+    square_rc: f32,
     sample_rate: f32,
+    square_peak: f32,
+    square_tau: f32,
+    square_coeff: f32,
 }
 
 impl SweepGenerator {
-    pub fn new(sample_rate: f32) -> Self {
-        Self {
+    pub fn new(sample_rate: f32, circuit: GenCircuit) -> Self {
+        let (square_peak, square_tau) = match circuit {
+            GenCircuit::Gen1 => (GEN1_SQUARE_PEAK, GEN1_SQUARE_TAU),
+            GenCircuit::Gen2 => (GEN2_SQUARE_PEAK, GEN2_SQUARE_TAU),
+        };
+        let mut g = Self {
             phase: 0.0,
+            square_rc: 0.0,
             sample_rate,
-        }
+            square_peak,
+            square_tau,
+            square_coeff: 0.0,
+        };
+        g.set_sample_rate(sample_rate);
+        g
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         self.sample_rate = sample_rate;
+        self.square_coeff = 1.0 - (-1.0 / (sample_rate * self.square_tau)).exp();
     }
 
     pub fn reset(&mut self) {
+        // Start at the bottom of the sweep, the way the integrator comes up
+        // after power-on.
         self.phase = 0.0;
+        self.square_rc = -self.square_peak;
     }
 
-    /// Advances the LFO phase and returns the normalized sweep value [0.0, 1.0].
-    /// `effective_freq` is in Hz.
-    #[inline(always)]
-    pub fn tick(&mut self, effective_freq: f32, shape: LfoShape) -> f32 {
-        let phase_inc = effective_freq / self.sample_rate;
-        self.phase += phase_inc;
+    /// Advance one sample and return the generator output in volts.
+    #[inline]
+    pub fn tick(&mut self, freq_hz: f32, shape: LfoShape) -> f32 {
+        self.phase += freq_hz / self.sample_rate;
         if self.phase >= 1.0 {
             self.phase -= self.phase.floor();
         }
 
-        match shape {
-            LfoShape::Sine => {
-                // Analog diode-bridge waveshaper emulation:
-                // Base triangle wave in [-1.0, 1.0]
-                let tri = if self.phase < 0.5 {
-                    4.0 * self.phase - 1.0
-                } else {
-                    3.0 - 4.0 * self.phase
-                };
+        // Triangle: −1 at phase 0, +1 at phase 0.5.
+        let tri = 1.0 - 4.0 * (self.phase - 0.5).abs();
+        // Comparator output is high while the integrator ramps up.
+        let comparator = if self.phase < 0.5 { 1.0 } else { -1.0 };
+        self.square_rc += (comparator * self.square_peak - self.square_rc) * self.square_coeff;
 
-                // CR2-CR5 diode bridge soft-saturation curve
-                let rounded = (tri * 1.5).tanh() * 1.15;
-                // Normalize from [-1, +1] to [0.0, 1.0]
-                (rounded * 0.5 + 0.5).clamp(0.0, 1.0)
-            }
-            LfoShape::Square => {
-                // Bipolar square wave [0.0, 1.0]
-                if self.phase < 0.5 {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
+        match shape {
+            LfoShape::Sine => tri * GEN_TRI_PEAK,
+            LfoShape::Square => self.square_rc,
         }
     }
 }

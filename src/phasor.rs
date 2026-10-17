@@ -1,49 +1,38 @@
-//! Musitronics 6-Stage Optical Phasor Channel (Phasor A / Phasor B).
+//! One Bi-Phase phasor channel, signal path in volts.
 //!
-//! Emulates:
-//! 1. Allpass filter cascade (6 stages default, selectable 2..12 poles)
-//! 2. Inverting summing amplifier feedback loop with op-amp rail soft saturation
-//! 3. CdS optocoupler module driving per-stage photoresistors
-//! 4. Accurate wet/dry mixing and deep phase cancellation nulls
+//! ```text
+//!  jack ─C1/R1─ Z8A ─┬────────────────────────── R31 12k ───────────┐
+//!                    │                                               │
+//!                    └─R4─ Z8B (−1) ─ 6 × all-pass ─C12─┬─ R26 ─ Z9B (−1) ─ PM1 ─ R123 ─ C14 ─ R29 ─┴─ Z9A ─ out
+//!                          ▲ (+2)                       │
+//!                          └── R6‖C5 ── R7 ── FEEDBACK pot (R133) ┘
+//! ```
+//!
+//! * The dry path is always present: with the footswitch off, PM1 goes dark
+//!   and the output is just the buffered input.
+//! * The wet signal is re-inverted by Z9B and summed passively with the dry
+//!   signal; R123 is the factory "notch depth" trim that matches the legs.
+//! * C12 (into R133‖R26) and C14 (into the mixer) high-pass the wet leg, so
+//!   the lowest octaves stay dry and solid instead of being cancelled.
+//! * The FEEDBACK pot taps the wet signal at J1-1 and feeds it to the
+//!   non-inverting input of Z8B with a gain of up to ~0.86, which adds the
+//!   resonant peaks between the notches.
+//!
+//! The feedback loop contains no unit delay: the instantaneous response of
+//! every stage is linear in its input, so the loop is solved exactly each
+//! sample before the states are advanced.
 
-use crate::allpass::{calc_allpass_coeff, AllpassStage};
-use crate::optocoupler::Optocoupler;
+use crate::allpass::AllpassStage;
+use crate::circuit::*;
+use crate::driver::LedDriver;
+use crate::optocoupler::{PhotoPod, PhotoSwitch};
 use truce::prelude::ParamEnum;
-
-#[derive(ParamEnum)]
-pub enum PolesCount {
-    #[name = "6 Poles (Classic)"]
-    Poles6,
-    #[name = "2 Poles"]
-    Poles2,
-    #[name = "4 Poles"]
-    Poles4,
-    #[name = "8 Poles"]
-    Poles8,
-    #[name = "10 Poles"]
-    Poles10,
-    #[name = "12 Poles (Series)"]
-    Poles12,
-}
-
-impl PolesCount {
-    pub fn num_stages(self) -> usize {
-        match self {
-            PolesCount::Poles6 => 6,
-            PolesCount::Poles2 => 2,
-            PolesCount::Poles4 => 4,
-            PolesCount::Poles8 => 8,
-            PolesCount::Poles10 => 10,
-            PolesCount::Poles12 => 12,
-        }
-    }
-}
 
 #[derive(ParamEnum)]
 pub enum PhasorASweepSource {
     #[name = "Gen 1"]
     Gen1,
-    #[name = "Pedal"]
+    #[name = "Ped"]
     Pedal,
 }
 
@@ -53,88 +42,283 @@ pub enum PhasorBSweepSource {
     Gen1,
     #[name = "Gen 2"]
     Gen2,
-    #[name = "Pedal"]
+    #[name = "Ped"]
     Pedal,
 }
 
+const TWO_PI: f32 = 2.0 * std::f32::consts::PI;
+
 pub struct PhasorChannel {
-    pub optocoupler: Optocoupler,
-    stages: [AllpassStage; 12],
-    feedback_state: f32,
+    pub pod: PhotoPod,
+    pub switch: PhotoSwitch,
+    driver: LedDriver,
+    stages: [AllpassStage; 6],
+    stage_cap: [f32; 6],
+    input_hp: OnePole,
+    c12: OnePole,
+    c5: OnePole,
+    c13: OnePole,
+    c14: OnePole,
+    r123: f32,
     sample_rate: f32,
+    g_input: f32,
+    g12: f32,
+    g13: f32,
+    // Cached feedback network for the last pot position.
+    fb_pos: f32,
+    fb_k: f32,
+    fb_g5: f32,
+    // Cached mixer network for the last PM1 resistance.
+    pm_r: f32,
+    mix_k: f32,
+    mix_g14: f32,
 }
 
 impl PhasorChannel {
-    pub fn new(sample_rate: f32, is_phasor_b: bool) -> Self {
-        Self {
-            optocoupler: Optocoupler::new(sample_rate, is_phasor_b),
-            stages: [AllpassStage::new(); 12],
-            feedback_state: 0.0,
-            sample_rate,
+    pub fn new(sample_rate: f32, is_b: bool) -> Self {
+        let tol = if is_b { CAP_TOL_B } else { CAP_TOL_A };
+        let mut stage_cap = [C_STAGE; 6];
+        for (c, t) in stage_cap.iter_mut().zip(tol) {
+            *c *= t;
         }
+        let mut ch = Self {
+            pod: PhotoPod::new(sample_rate, is_b),
+            switch: PhotoSwitch::new(sample_rate),
+            driver: LedDriver::new(),
+            stages: [AllpassStage::default(); 6],
+            stage_cap,
+            input_hp: OnePole::default(),
+            c12: OnePole::default(),
+            c5: OnePole::default(),
+            c13: OnePole::default(),
+            c14: OnePole::default(),
+            r123: if is_b { R123_B } else { R123_A },
+            sample_rate,
+            g_input: 0.0,
+            g12: 0.0,
+            g13: 0.0,
+            fb_pos: -1.0,
+            fb_k: 0.0,
+            fb_g5: 0.0,
+            pm_r: -1.0,
+            mix_k: 0.0,
+            mix_g14: 0.0,
+        };
+        ch.set_sample_rate(sample_rate);
+        ch
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         self.sample_rate = sample_rate;
-        self.optocoupler.set_sample_rate(sample_rate);
+        self.pod.set_sample_rate(sample_rate);
+        self.switch.set_sample_rate(sample_rate);
+        self.g_input = one_pole_g(1.0 / (TWO_PI * R_IN * C_IN), sample_rate);
+        self.g12 = one_pole_g(1.0 / (TWO_PI * R_J1_LOAD * C12), sample_rate);
+        self.g13 = one_pole_g(1.0 / (TWO_PI * R27 * C13), sample_rate);
+        self.fb_pos = -1.0;
+        self.pm_r = -1.0;
     }
 
-    pub fn reset(&mut self) {
-        self.optocoupler.reset();
-        for st in &mut self.stages {
-            st.reset();
+    /// Clear the filters and settle the photocells for the given sweep CV
+    /// and footswitch state.
+    pub fn reset(&mut self, cv: f32, on: bool) {
+        for s in &mut self.stages {
+            s.reset();
         }
-        self.feedback_state = 0.0;
+        self.input_hp.reset();
+        self.c12.reset();
+        self.c5.reset();
+        self.c13.reset();
+        self.c14.reset();
+        self.pod.settle(self.driver.current_ma(cv));
+        self.switch.settle(on);
+        self.fb_pos = -1.0;
+        self.pm_r = -1.0;
     }
 
-    /// Processes one sample through this phaser channel.
-    /// Returns (processed_sample, wet_only_sample).
-    #[inline(always)]
-    pub fn process_sample(
-        &mut self,
-        input: f32,
-        sweep_cv: f32,
-        depth: f32,       // 0.0 to 1.0 (potentiometer range 0 to 10)
-        feedback: f32,    // 0.0 to 1.0 (potentiometer range 0 to 10)
-        poles: PolesCount,
-        bypass: bool,
-    ) -> (f32, f32) {
-        if bypass {
-            return (input, input);
+    #[inline]
+    fn update_feedback_network(&mut self, pos: f32) {
+        if (pos - self.fb_pos).abs() < 1e-5 {
+            return;
+        }
+        self.fb_pos = pos;
+        let (ratio, r_th) = pot_divider(pos, R_FB_POT);
+        let r_src = R7 + r_th;
+        self.fb_k = ratio * R6 / (R6 + r_src);
+        let r_par = R6 * r_src / (R6 + r_src);
+        self.fb_g5 = one_pole_g(1.0 / (TWO_PI * r_par * C5), self.sample_rate);
+    }
+
+    #[inline]
+    fn update_mixer_network(&mut self, r_pm: f32) {
+        if (r_pm - self.pm_r).abs() < 1e-3 * self.pm_r.abs() {
+            return;
+        }
+        self.pm_r = r_pm;
+        let r_wet = r_pm + self.r123 + R29;
+        self.mix_k = R31 / (R31 + r_wet);
+        self.mix_g14 = one_pole_g(1.0 / (TWO_PI * (R31 + r_wet) * C14), self.sample_rate);
+    }
+
+    /// Process one sample.
+    ///
+    /// * `x` – voltage at the input jack
+    /// * `cv` – sweep control voltage after the DEPTH pot (J1-5 / J1-6)
+    /// * `feedback` – FEEDBACK pot rotation, 0..1
+    /// * `on` – footswitch state
+    ///
+    /// Returns the voltage at the phasor output jack.
+    #[inline]
+    pub fn process(&mut self, x: f32, cv: f32, feedback: f32, on: bool) -> f32 {
+        // Z8A input buffer.
+        let dry = opamp_clip(self.input_hp.hp(x, self.g_input));
+
+        // LED driver → photocells → per-stage cutoff.
+        self.pod.tick(self.driver.current_ma(cv));
+        let mut g = [0.0f32; 6];
+        for (i, gi) in g.iter_mut().enumerate() {
+            let fc = 1.0 / (TWO_PI * self.pod.stage_resistance(i) * self.stage_cap[i]);
+            *gi = one_pole_g(fc, self.sample_rate);
         }
 
-        // Depth scales the optical drive swing around a nominal center point
-        let center = 0.35;
-        let drive = (center + (sweep_cv - center) * depth).clamp(0.0, 1.0);
+        self.update_feedback_network(feedback);
+        let (fb_k, g5, g12) = (self.fb_k, self.fb_g5, self.g12);
 
-        // Advance CdS optical dynamics
-        self.optocoupler.tick(drive);
-
-        // Feedback loop with analog op-amp rail saturation
-        let fb_gain = feedback.clamp(0.0, 1.0) * 0.94;
-        let fb_signal = self.feedback_state * fb_gain;
-
-        // Sum input with inverted feedback per schematic (Z8B inverting summing node)
-        let in_sum = input - fb_signal;
-
-        // Cascade through allpass stages
-        let num_stages = poles.num_stages();
-        let mut y = in_sum;
-
-        for i in 0..num_stages {
-            let fc = self.optocoupler.stage_cutoff_hz(i);
-            let a = calc_allpass_coeff(fc, self.sample_rate);
-            y = self.stages[i].process(y, a);
+        // Solve the loop: u = 2·V+ − dry, V+ = LP5(k·w), w = HP12(AP6(u)).
+        let (mut a, mut b) = (1.0f32, 0.0f32);
+        for (st, &gi) in self.stages.iter().zip(&g) {
+            let (sa, sb) = st.response(gi);
+            a *= sa;
+            b = sa * b + sb;
         }
+        let c = 1.0 - g12;
+        let d = -self.c12.lp_offset(g12);
+        let e = g5 * fb_k;
+        let f = self.c5.lp_offset(g5);
+        let u_lin = (2.0 * e * (c * b + d) + 2.0 * f - dry) / (1.0 - 2.0 * e * c * a);
+        let u = opamp_clip(u_lin);
 
-        // Op-amp feedback non-linear soft saturation (Z9B/Z8B rail limits)
-        let fb_saturated = (y * 1.2).tanh();
-        self.feedback_state = fb_saturated;
+        // Advance the states with the solved input.
+        let mut y = u;
+        for (st, &gi) in self.stages.iter_mut().zip(&g) {
+            y = st.process(y, gi);
+        }
+        let w = self.c12.hp(y, g12);
+        self.c5.lp(fb_k * w, g5);
 
-        // Summing node (Z9A / Z11A)
-        let wet_out = y;
-        let mixed = 0.5 * input + 0.5 * wet_out;
+        // Z9B re-inverts the wet signal.
+        let wet = -self.c13.lp(w, self.g13);
 
-        (mixed, wet_out)
+        // PM1 optical switch and the passive R31/R29 mixer into Z9A.
+        let r_pm = self.switch.tick(on);
+        self.update_mixer_network(r_pm);
+        let out = dry + self.mix_k * self.c14.hp(wet - dry, self.mix_g14);
+        opamp_clip(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sweep::{GenCircuit, LfoShape, SweepGenerator};
+
+    /// Steady-state gain (dB) of a sine through the channel.
+    fn gain_db(freq: f32, cv: f32, fb: f32) -> f32 {
+        let sr = 48_000.0;
+        let mut ch = PhasorChannel::new(sr, false);
+        ch.reset(cv, true);
+        let n = 24_000;
+        let (mut acc_in, mut acc_out) = (0.0f64, 0.0f64);
+        for i in 0..n {
+            let x = (2.0 * std::f32::consts::PI * freq * i as f32 / sr).sin();
+            let y = ch.process(x, cv, fb, true);
+            if i > n / 2 {
+                acc_in += f64::from(x * x);
+                acc_out += f64::from(y * y);
+            }
+        }
+        10.0 * (acc_out / acc_in).log10() as f32
+    }
+
+    fn notches(cv: f32, fb: f32) -> Vec<(f32, f32)> {
+        let mut freqs = Vec::new();
+        let mut f = 30.0f32;
+        while f < 20_000.0 {
+            freqs.push(f);
+            f *= 1.06;
+        }
+        let g: Vec<f32> = freqs.iter().map(|&f| gain_db(f, cv, fb)).collect();
+        (1..g.len() - 1)
+            .filter(|&i| g[i] < g[i - 1] && g[i] < g[i + 1] && g[i] < -6.0)
+            .map(|i| (freqs[i], g[i]))
+            .collect()
+    }
+
+    #[test]
+    fn six_stages_give_three_deep_notches() {
+        let n = notches(0.0, 0.0);
+        assert_eq!(n.len(), 3, "{n:?}");
+        assert!(n.iter().all(|&(_, db)| db < -15.0), "{n:?}");
+        // Mid-sweep, the first notch sits in the low mids.
+        assert!(n[0].0 > 250.0 && n[0].0 < 700.0, "{n:?}");
+    }
+
+    #[test]
+    fn feedback_adds_peaks_between_notches() {
+        let peak = (300..3000)
+            .step_by(50)
+            .map(|f| gain_db(f as f32, 0.0, 1.0))
+            .fold(f32::MIN, f32::max);
+        assert!(peak > 8.0 && peak < 16.0, "peak = {peak}");
+    }
+
+    #[test]
+    fn footswitch_off_passes_dry_signal() {
+        let sr = 48_000.0;
+        let mut ch = PhasorChannel::new(sr, false);
+        ch.reset(0.0, false);
+        let (mut e_in, mut e_out) = (0.0f64, 0.0f64);
+        for i in 0..24_000 {
+            let x = (2.0 * std::f32::consts::PI * 1500.0 * i as f32 / sr).sin();
+            let y = ch.process(x, 0.0, 0.0, false);
+            if i > 12_000 {
+                e_in += f64::from(x * x);
+                e_out += f64::from(y * y);
+            }
+        }
+        let db = 10.0 * (e_out / e_in).log10();
+        assert!(db.abs() < 0.2, "{db}");
+    }
+
+    /// Range of the middle-stage cutoff over a few sweep cycles.
+    fn sweep_range(rate: f32, shape: LfoShape) -> (f32, f32) {
+        let sr = 48_000.0;
+        let mut ch = PhasorChannel::new(sr, false);
+        let mut sg = SweepGenerator::new(sr, GenCircuit::Gen1);
+        sg.reset();
+        ch.reset(-5.0, true);
+        let n = (sr * 3.0 / rate) as usize;
+        let (mut lo, mut hi) = (f32::MAX, 0.0f32);
+        for i in 0..n {
+            let cv = sg.tick(rate, shape);
+            ch.process(0.0, cv, 0.0, true);
+            if i > n * 2 / 3 {
+                let f = ch.pod.center_hz();
+                lo = lo.min(f);
+                hi = hi.max(f);
+            }
+        }
+        (lo, hi)
+    }
+
+    #[test]
+    fn photocells_compress_fast_sweeps() {
+        let (slow_lo, slow_hi) = sweep_range(0.5, LfoShape::Sine);
+        let (fast_lo, fast_hi) = sweep_range(8.0, LfoShape::Sine);
+        // A slow full-depth sweep spans more than five octaves...
+        assert!(slow_hi / slow_lo > 32.0, "{slow_lo}..{slow_hi}");
+        // ...while the cells cannot fully darken between fast cycles.
+        assert!(fast_lo > 1.5 * slow_lo, "{fast_lo} vs {slow_lo}");
+        assert!(fast_hi > 0.8 * slow_hi);
     }
 }

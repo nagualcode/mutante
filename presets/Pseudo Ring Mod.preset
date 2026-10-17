@@ -1,0 +1,35 @@
+uuid = "9be36e9c-2430-5ee5-a1e0-ed71b056f8f3"
+name = "Pseudo Ring Mod"
+category = "Manual"
+author = "Jardim Sonoro"
+comment = "Gen 1 near the top of its range with feedback up gives the pseudo-ring-modulation effect."
+tags = ["fast", "fx"]
+default = false
+
+[params]
+gen_1_rate = 15.0
+gen_1_sync = 0
+gen_1_synced_rate = 6
+gen_1_shape = 0
+gen_1_rate_ctrl = 0
+gen_2_rate = 1.6
+gen_2_sync = 0
+gen_2_synced_rate = 6
+gen_2_shape = 0
+phasor_a_depth = 6.0
+phasor_a_feedback = 9.0
+phasor_a_sweep = 0
+phasor_a_on = 1
+phasor_b_depth = 6.0
+phasor_b_feedback = 9.0
+phasor_b_sweep = 0
+phasor_b_sweep_sync = 1
+phasor_b_on = 1
+routing = 0
+pedal_position = 0.5
+pedal_mode = 0
+pedal_sensitivity = 2.0
+input_level = 0.0
+mix = 1.0
+output_gain = 0.0
+bypass = 0

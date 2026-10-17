@@ -1,23 +1,23 @@
-//! Musitronics Bi-Phase Routing Matrix.
+//! "Phasor B Input" switch (S1).
 //!
-//! Models the authentic 3-position "Phasor B Input" hardware rotary switch (S1):
-//! 1. `InB`: True Stereo / Dual Mono. Inputs A and B are processed independently.
-//! 2. `InA`: Dual Parallel (Mono to Stereo). Input A feeds both Phasor A and Phasor B.
-//! 3. `OutA`: 12-Stage Serial Cascade. Phasor A feeds directly into Phasor B!
+//! * `In A`  – Input A feeds both phasors (one instrument, two outputs:
+//!   stereo phasing with Sweep Sync on Rev). Output A → left, B → right.
+//! * `Out A` – the complete Phasor A output (dry + wet) feeds Phasor B: two
+//!   phasors in series, the "12-stage" double-depth setting. Output B is
+//!   sent to both channels, as in the manual's one-amp setup.
+//! * `In B`  – independent inputs: left → Phasor A, right → Phasor B.
 //!
-//! Plus modern DAW stereo configurations:
-//! 4. `StereoParallel`: Stereo cross-mixed parallel processing.
+//! In the plugin, "Input A" for `In A` / `Out A` is the mono sum of the
+//! incoming stereo pair.
 
 use truce::prelude::ParamEnum;
 
 #[derive(ParamEnum)]
 pub enum PhasorBInput {
-    #[name = "In B (Stereo / Dual Mono)"]
-    InB,
-    #[name = "In A (Mono -> Stereo)"]
+    #[name = "In A"]
     InA,
-    #[name = "Out A (12-Stage Series)"]
+    #[name = "Out A"]
     OutA,
-    #[name = "Stereo Parallel"]
-    StereoParallel,
+    #[name = "In B"]
+    InB,
 }

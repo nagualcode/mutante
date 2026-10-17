@@ -22,8 +22,9 @@ rt-paranoid = ["truce/rt-paranoid"]
 
 [dependencies]
 truce = { version = "6.3" }
-truce-gui-types = { version = "6.3" }
 truce-gui = { version = "6.3" }
+truce-egui = { version = "6.3" }
+egui = { version = "0.34" }
 truce-clap = { version = "6.3", optional = true }
 truce-vst3 = { version = "6.3", optional = true }
 truce-au = { version = "6.3", optional = true }

@@ -1,131 +1,182 @@
-//! Cadmium Sulfide (CdS) Optocoupler / Vactrol Physics Model.
+//! Cadmium-sulphide photocell models.
 //!
-//! Emulates the physical behavior of the Musitronics optical pods (PM3 and PM4),
-//! each consisting of a central light source illuminating 6 matched photoresistors.
+//! [`PhotoPod`] is one Musitronics phase pod (PM3 / PM4): a single LED in a
+//! light-tight can surrounded by six CdS cells, one per all-pass stage.
+//! [`PhotoSwitch`] is the PM1 / PM2 lamp+cell that the footswitch uses to fade
+//! the wet signal in and out.
 //!
-//! Physics modeled:
-//! 1. Non-linear photoconductive power-law: R(L) = R_light + (R_dark - R_light) / (1 + k*L)^gamma
-//! 2. Asymmetric dual-time-constant kinetics (fast rise ~10ms, two-stage decay ~45ms/200ms)
-//! 3. Parallel fixed bias resistor (220 kΩ) across each LDR per schematic
-//! 4. 6.8 nF timing capacitors and subtle organic inter-stage component dispersion
+//! The cell conductance follows the photoconductive law G ∝ I^γ. Its
+//! dynamics are integrated in the log-conductance domain, which reproduces
+//! the way CdS resistance changes multiplicatively: brightening is fast
+//! (a few ms), while darkening slows down the darker the cell gets, because
+//! recombination of the remaining carriers takes longer at low densities.
+//! At high sweep rates this makes the cells "hang" on the bright side and
+//! narrows the sweep, which is the behaviour the manual describes when it
+//! suggests reducing depth at higher speeds.
 
-const R_DARK: f32 = 2_500_000.0; // 2.5 MΩ dark resistance
-const R_LIGHT: f32 = 350.0;      // 350 Ω minimum illuminated resistance
-const R_BIAS: f32 = 220_000.0;   // 220 kΩ schematic shunt resistor
-const CAP_FARADS: f32 = 6.8e-9;  // 6.8 nF (0.0068 µF) schematic capacitor
-const GAMMA: f32 = 0.82;         // CdS response exponent
+use crate::circuit::*;
 
-/// Per-stage component tolerance offsets for Phasor A (organic dispersion)
-const DISPERSION_A: [f32; 6] = [-0.025, 0.018, -0.012, 0.031, -0.019, 0.022];
-/// Per-stage component tolerance offsets for Phasor B (organic dispersion)
-const DISPERSION_B: [f32; 6] = [0.021, -0.015, 0.028, -0.024, 0.014, -0.018];
+/// Floor for the light-driven conductance so the log state stays finite.
+const G_FLOOR: f32 = 1.0 / 200e6;
+const TAU_ON: f32 = 0.0035;
+const TAU_OFF_REF: f32 = 0.022;
+const TAU_OFF_MAX: f32 = 1.5;
+/// How strongly the darkening time constant grows as the cell gets darker.
+const TAU_OFF_SLOPE: f32 = 0.35;
 
 #[derive(Clone, Copy)]
-pub struct Optocoupler {
-    // Current optical states
-    light_fast: f32,
-    light_slow: f32,
-    effective_light: f32,
-
-    // Filter coefficients for ballistics
-    coeff_rise: f32,
-    coeff_fall_fast: f32,
-    coeff_fall_slow: f32,
-
-    sample_rate: f32,
-    is_phasor_b: bool,
+struct CdsCell {
+    /// ln of the light-driven conductance (siemens).
+    ln_g: f32,
+    /// ln of the conductance at 1 mA, the reference for the decay slope.
+    ln_g_ref: f32,
+    inv_r_at_1ma: f32,
+    dt: f32,
 }
 
-impl Optocoupler {
-    pub fn new(sample_rate: f32, is_phasor_b: bool) -> Self {
-        let mut op = Self {
-            light_fast: 0.0,
-            light_slow: 0.0,
-            effective_light: 0.0,
-            coeff_rise: 0.0,
-            coeff_fall_fast: 0.0,
-            coeff_fall_slow: 0.0,
-            sample_rate,
-            is_phasor_b,
-        };
-        op.recalc_coefficients();
-        op
-    }
-
-    pub fn set_sample_rate(&mut self, sample_rate: f32) {
-        self.sample_rate = sample_rate;
-        self.recalc_coefficients();
-    }
-
-    pub fn reset(&mut self) {
-        self.light_fast = 0.0;
-        self.light_slow = 0.0;
-        self.effective_light = 0.0;
-    }
-
-    fn recalc_coefficients(&mut self) {
-        // Physical CdS time constants:
-        // Attack (light on): tau ~ 10 ms
-        let tau_rise = 0.010;
-        // Release (light off): dual-stage decay
-        // Fast component (70%): tau ~ 45 ms
-        let tau_fall_fast = 0.045;
-        // Slow persistent photoconductivity component (30%): tau ~ 200 ms
-        let tau_fall_slow = 0.200;
-
-        self.coeff_rise = 1.0 - (-1.0 / (self.sample_rate * tau_rise)).exp();
-        self.coeff_fall_fast = 1.0 - (-1.0 / (self.sample_rate * tau_fall_fast)).exp();
-        self.coeff_fall_slow = 1.0 - (-1.0 / (self.sample_rate * tau_fall_slow)).exp();
-    }
-
-    /// Advances the optical dynamics by one sample given an instantaneous drive voltage [0..1].
-    #[inline(always)]
-    pub fn tick(&mut self, drive_normalized: f32) {
-        // Non-linear LED/driver current response: soft threshold knee
-        let target_light = (drive_normalized.max(0.0) * 1.1).min(1.0);
-
-        if target_light > self.effective_light {
-            // Rising light: dominated by rapid photoexcitation
-            self.light_fast += (target_light - self.light_fast) * self.coeff_rise;
-            self.light_slow += (target_light - self.light_slow) * self.coeff_rise;
-            self.effective_light = self.light_fast;
-        } else {
-            // Decaying light: two-phase carrier recombination and crystal trap release
-            self.light_fast += (target_light - self.light_fast) * self.coeff_fall_fast;
-            self.light_slow += (target_light - self.light_slow) * self.coeff_fall_slow;
-            self.effective_light = 0.70 * self.light_fast + 0.30 * self.light_slow;
+impl CdsCell {
+    fn new(r_at_1ma: f32, sample_rate: f32) -> Self {
+        Self {
+            ln_g: G_FLOOR.ln(),
+            ln_g_ref: (1.0 / r_at_1ma).ln(),
+            inv_r_at_1ma: 1.0 / r_at_1ma,
+            dt: 1.0 / sample_rate,
         }
     }
 
-    /// Computes the cutoff frequency (Hz) for stage `stage_idx` (0..5).
-    #[inline(always)]
-    pub fn stage_cutoff_hz(&self, stage_idx: usize) -> f32 {
-        let dispersion = if self.is_phasor_b {
-            DISPERSION_B[stage_idx % 6]
-        } else {
-            DISPERSION_A[stage_idx % 6]
-        };
-
-        // Photoconductive power law
-        let ldr_scale = (1.0 + 80.0 * self.effective_light).powf(GAMMA);
-        let mut r_ldr = R_LIGHT + (R_DARK - R_LIGHT) / ldr_scale;
-
-        // Apply physical component dispersion
-        r_ldr *= 1.0 + dispersion;
-
-        // Effective resistance with R_BIAS (220 kΩ) in parallel
-        let r_eff = (r_ldr * R_BIAS) / (r_ldr + R_BIAS);
-
-        // Allpass break frequency fc = 1 / (2 * pi * R * C)
-        let fc = 1.0 / (2.0 * std::f32::consts::PI * r_eff * CAP_FARADS);
-
-        // Clamp safely below Nyquist
-        let max_fc = (0.45 * self.sample_rate).min(20_000.0);
-        fc.clamp(40.0, max_fc)
+    fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.dt = 1.0 / sample_rate;
     }
 
-    /// Returns current effective optical brightness [0..1] for GUI/meters.
-    pub fn brightness(&self) -> f32 {
-        self.effective_light.clamp(0.0, 1.0)
+    /// Steady-state conductance for an LED current in mA.
+    #[inline]
+    fn target_ln_g(&self, current_ma: f32) -> f32 {
+        let g = if current_ma > 1e-6 {
+            self.inv_r_at_1ma * current_ma.powf(LDR_GAMMA)
+        } else {
+            0.0
+        };
+        (g + G_FLOOR).ln()
+    }
+
+    #[inline]
+    fn advance(&mut self, target_ln_g: f32) {
+        let tau = if target_ln_g > self.ln_g {
+            TAU_ON
+        } else {
+            (TAU_OFF_REF * (TAU_OFF_SLOPE * (self.ln_g_ref - self.ln_g)).exp())
+                .clamp(TAU_ON, TAU_OFF_MAX)
+        };
+        let x = self.dt / tau;
+        self.ln_g += (target_ln_g - self.ln_g) * (x / (1.0 + x));
+    }
+
+    #[inline]
+    fn conductance(&self) -> f32 {
+        self.ln_g.exp()
+    }
+
+    fn settle(&mut self, current_ma: f32) {
+        self.ln_g = self.target_ln_g(current_ma);
+    }
+}
+
+/// One six-cell phase pod.
+#[derive(Clone, Copy)]
+pub struct PhotoPod {
+    cell: CdsCell,
+    coupling: [f32; 6],
+    current_ma: f32,
+}
+
+impl PhotoPod {
+    pub fn new(sample_rate: f32, is_b: bool) -> Self {
+        let r1 = if is_b { LDR_R_AT_1MA_B } else { LDR_R_AT_1MA_A };
+        let coupling = if is_b { LIGHT_COUPLING_B } else { LIGHT_COUPLING_A };
+        Self {
+            cell: CdsCell::new(r1, sample_rate),
+            coupling,
+            current_ma: 0.0,
+        }
+    }
+
+    pub fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.cell.set_sample_rate(sample_rate);
+    }
+
+    /// Jump straight to the steady state for `current_ma` (used on reset so
+    /// the plugin does not start with a slow fade-in from darkness).
+    pub fn settle(&mut self, current_ma: f32) {
+        self.current_ma = current_ma;
+        self.cell.settle(current_ma);
+    }
+
+    #[inline]
+    pub fn tick(&mut self, current_ma: f32) {
+        self.current_ma = current_ma;
+        let t = self.cell.target_ln_g(current_ma);
+        self.cell.advance(t);
+    }
+
+    /// Resistance to ground of stage `i`: photocell in parallel with the
+    /// 220 kΩ shunt (R10, R13, ...).
+    #[inline]
+    pub fn stage_resistance(&self, i: usize) -> f32 {
+        let g = self.cell.conductance() * self.coupling[i] + 1.0 / LDR_R_DARK + 1.0 / R_SHUNT;
+        1.0 / g
+    }
+
+    /// 0..1 display value for the pod glow (log of the light level).
+    pub fn glow(&self) -> f32 {
+        (self.current_ma / 16.0).clamp(0.0, 1.0).sqrt()
+    }
+
+    /// Representative cutoff (Hz) of the middle stages, for display.
+    pub fn center_hz(&self) -> f32 {
+        let r = self.stage_resistance(2);
+        1.0 / (2.0 * std::f32::consts::PI * r * C_STAGE)
+    }
+}
+
+/// PM1 / PM2 optical bypass element.
+#[derive(Clone, Copy)]
+pub struct PhotoSwitch {
+    ln_r: f32,
+    dt: f32,
+}
+
+impl PhotoSwitch {
+    pub fn new(sample_rate: f32) -> Self {
+        Self {
+            ln_r: R_PM_ON.ln(),
+            dt: 1.0 / sample_rate,
+        }
+    }
+
+    pub fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.dt = 1.0 / sample_rate;
+    }
+
+    pub fn settle(&mut self, on: bool) {
+        self.ln_r = if on { R_PM_ON } else { R_PM_OFF }.ln();
+    }
+
+    /// Advance and return the cell resistance in ohms.
+    #[inline]
+    pub fn tick(&mut self, on: bool) -> f32 {
+        let (target, tau) = if on {
+            (R_PM_ON.ln(), 0.006)
+        } else {
+            // Lamp off: the cell darkens slowly, faster at first.
+            let darkness = (self.ln_r - R_PM_ON.ln()).max(0.0);
+            (R_PM_OFF.ln(), 0.030 * (0.45 * darkness).exp())
+        };
+        let x = self.dt / tau;
+        self.ln_r += (target - self.ln_r) * (x / (1.0 + x));
+        self.ln_r.exp()
+    }
+
+    pub fn is_lit(&self) -> bool {
+        self.ln_r < (4.0 * R_PM_ON).ln()
     }
 }
