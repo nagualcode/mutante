@@ -1,3 +1,7 @@
 /target
 **/.DS_Store
 *.log
+__pycache__/
+
+# Local-only white-box study of the reference plug-in (never publish)
+/research/whitebox/

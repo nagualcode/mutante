@@ -21,6 +21,12 @@ pub const C_IN: f32 = 0.047e-6;
 pub const R_IN: f32 = 390e3;
 
 // --- Feedback summing amplifier (Z8B / Z10B) -----------------------------------
+/// R4 / R36: dry input resistor into the Z8B inverting input.
+pub const R4: f32 = 4.7e3;
+/// R5 / R37: Z8B feedback resistor (inverting gain −R5/R4 = −1).
+pub const R5: f32 = 4.7e3;
+/// C4 / C20 across R5: puts a 33.9 kHz pole inside the feedback loop.
+pub const C4: f32 = 0.001e-6;
 /// R6 / R38: lower leg of the feedback divider at the non-inverting input.
 pub const R6: f32 = 4.7e3;
 /// R7 / R39: series resistor from the FEEDBACK pot wiper.
@@ -41,9 +47,6 @@ pub const C_STAGE: f32 = 0.0068e-6;
 pub const C12: f32 = 0.47e-6;
 /// R26 / R59: 4.7 kΩ input resistor of the Z9B / Z11B inverting wet amplifier.
 pub const R26: f32 = 4.7e3;
-/// Load seen by C12 at feedback = 0: R133 (10 kΩ to ground) in parallel with
-/// R26 (4.7 kΩ into the Z9B virtual ground).
-pub const R_J1_LOAD: f32 = R_FB_POT * R26 / (R_FB_POT + R26);
 /// C13 across R27 (Z9B): 33.9 kHz roll-off of the re-inverted wet signal.
 pub const C13: f32 = 0.001e-6;
 pub const R27: f32 = 4.7e3;
@@ -59,7 +62,7 @@ pub const R31: f32 = 12e3;
 pub const R123_A: f32 = 6.95e3;
 pub const R123_B: f32 = 6.62e3;
 
-// --- Optical bypass PM1 / PM2 (PBT5-12 photocell + lamp) ------------------------
+// --- Optical bypass PM1 / PM2 (photocell lit by its internal LED via R30) -------
 pub const R_PM_ON: f32 = 500.0;
 pub const R_PM_OFF: f32 = 8e6;
 
@@ -106,10 +109,12 @@ pub const R_DEPTH_FLOOR: f32 = 560.0;
 // --- Photocell pods PM3 / PM4 ---------------------------------------------------
 /// Photocell resistance at 1 mA of LED current (each pod shares one LED
 /// between six cells, so the cells see far less light than a vactrol).
-pub const LDR_R_AT_1MA_A: f32 = 55e3;
-pub const LDR_R_AT_1MA_B: f32 = 58e3;
+/// Calibrated so the full sweep runs from the 220 kΩ-limited ~110 Hz floor
+/// up to ~12 kHz per stage (about 1.9 kΩ per cell at the 16 mA LED maximum).
+pub const LDR_R_AT_1MA_A: f32 = 25.4e3;
+pub const LDR_R_AT_1MA_B: f32 = 26.8e3;
 /// Photoconductive exponent: R ∝ I^-γ.
-pub const LDR_GAMMA: f32 = 0.9;
+pub const LDR_GAMMA: f32 = 0.945;
 /// Dark resistance of a CdS cell.
 pub const LDR_R_DARK: f32 = 5e6;
 

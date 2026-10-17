@@ -56,6 +56,7 @@ pub struct PhasorChannel {
     stage_cap: [f32; 6],
     stage_w_scale: [f32; 6],
     input_hp: OnePole,
+    c4: OnePole,
     c12: OnePole,
     c5: OnePole,
     c13: OnePole,
@@ -63,6 +64,7 @@ pub struct PhasorChannel {
     r123: f32,
     sample_rate: f32,
     g_input: f32,
+    g4: f32,
     g12: f32,
     g13: f32,
     // Cached feedback network for the last pot position.
@@ -90,6 +92,7 @@ impl PhasorChannel {
             stage_cap,
             stage_w_scale: [0.0; 6],
             input_hp: OnePole::default(),
+            c4: OnePole::default(),
             c12: OnePole::default(),
             c5: OnePole::default(),
             c13: OnePole::default(),
@@ -97,6 +100,7 @@ impl PhasorChannel {
             r123: if is_b { R123_B } else { R123_A },
             sample_rate,
             g_input: 0.0,
+            g4: 0.0,
             g12: 0.0,
             g13: 0.0,
             fb_pos: -1.0,
@@ -118,7 +122,7 @@ impl PhasorChannel {
             *w_scale = 1.0 / (TWO_PI * cap * sample_rate);
         }
         self.g_input = one_pole_g(1.0 / (TWO_PI * R_IN * C_IN), sample_rate);
-        self.g12 = one_pole_g(1.0 / (TWO_PI * R_J1_LOAD * C12), sample_rate);
+        self.g4 = one_pole_g(1.0 / (TWO_PI * R5 * C4), sample_rate);
         self.g13 = one_pole_g(1.0 / (TWO_PI * R27 * C13), sample_rate);
         self.fb_pos = -1.0;
         self.pm_r = -1.0;
@@ -131,6 +135,7 @@ impl PhasorChannel {
             s.reset();
         }
         self.input_hp.reset();
+        self.c4.reset();
         self.c12.reset();
         self.c5.reset();
         self.c13.reset();
@@ -190,7 +195,8 @@ impl PhasorChannel {
         self.update_feedback_network(feedback);
         let (fb_k, g5, g12) = (self.fb_k, self.fb_g5, self.g12);
 
-        // Solve the loop: u = 2·V+ − dry, V+ = LP5(k·w), w = HP12(AP6(u)).
+        // Solve the loop: u = V+ + (R5/R4)·LP4(V+ − dry) (Z8B, C4 ‖ R5),
+        // V+ = LP5(k·w), w = HP12(AP6(u)).
         let (mut a, mut b) = (1.0f32, 0.0f32);
         for (st, &gi) in self.stages.iter().zip(&g) {
             let (sa, sb) = st.response(gi);
@@ -201,7 +207,10 @@ impl PhasorChannel {
         let d = -self.c12.lp_offset(g12);
         let e = g5 * fb_k;
         let f = self.c5.lp_offset(g5);
-        let u_lin = (2.0 * e * (c * b + d) + 2.0 * f - dry) / (1.0 - 2.0 * e * c * a);
+        let k4 = (R5 / R4) * self.g4;
+        let h = 1.0 + k4;
+        let o4 = (R5 / R4) * self.c4.lp_offset(self.g4);
+        let u_lin = (h * (e * (c * b + d) + f) - k4 * dry + o4) / (1.0 - h * e * c * a);
         let u = opamp_clip(u_lin);
 
         // Advance the states with the solved input.
@@ -210,7 +219,8 @@ impl PhasorChannel {
             y = st.process(y, gi);
         }
         let w = self.c12.hp(y, g12);
-        self.c5.lp(fb_k * w, g5);
+        let v_plus = self.c5.lp(fb_k * w, g5);
+        self.c4.lp(v_plus - dry, self.g4);
 
         // Z9B re-inverts the wet signal (with 4558 rail limiting).
         let wet = opamp_clip(-self.c13.lp(w, self.g13));
@@ -265,8 +275,8 @@ mod tests {
         let n = notches(0.0, 0.0);
         assert_eq!(n.len(), 3, "{n:?}");
         assert!(n.iter().all(|&(_, db)| db < -15.0), "{n:?}");
-        // Mid-sweep, the first notch sits in the low mids.
-        assert!(n[0].0 > 250.0 && n[0].0 < 700.0, "{n:?}");
+        // Mid-sweep (pedal centred), the first notch sits around 900 Hz.
+        assert!(n[0].0 > 600.0 && n[0].0 < 1200.0, "{n:?}");
     }
 
     #[test]
@@ -332,7 +342,8 @@ mod tests {
     fn feedback_pot_loads_c12_highpass() {
         let r0 = j1_load_resistance(0.0);
         let r1 = j1_load_resistance(1.0);
-        assert!((r0 - R_J1_LOAD).abs() < 1.0, "r0 = {r0}");
+        // R133 (10 kΩ) ‖ R26 (4.7 kΩ) with the wiper grounded.
+        assert!((r0 - 3197.3).abs() < 1.0, "r0 = {r0}");
         assert!(r1 < r0 * 0.80 && r1 > 2400.0, "r1 = {r1}");
     }
 }

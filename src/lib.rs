@@ -13,6 +13,7 @@ mod circuit;
 mod driver;
 mod envelope;
 mod optocoupler;
+mod oversample;
 mod phasor;
 mod routing;
 mod sweep;
@@ -27,12 +28,14 @@ pub use routing::PhasorBInput;
 pub use sweep::{GenCircuit, LfoShape, RateControl, SweepGenerator, SweepSync, SyncRate};
 
 use circuit::{GEN_TRI_PEAK, R_DEPTH_FLOOR, R_DEPTH_POT, VOLTS_PER_FS};
+use oversample::{Downsampler2x, Upsampler2x};
 
 #[derive(Params)]
 pub struct MutanteParams {
     // --- Sweep Generator 1 ---
     #[param(name = "Gen 1 Rate", short_name = "Rate 1", range = "log(0.1, 18.0)",
-            default = 0.4, smooth = "exp(30)")]
+            default = 0.4, unit = "Hz", format = "format_rate",
+            smooth = "exp(30)")]
     pub gen_1_rate: FloatParam,
 
     #[param(name = "Gen 1 Sync", short_name = "Sync 1", default = false)]
@@ -49,7 +52,8 @@ pub struct MutanteParams {
 
     // --- Sweep Generator 2 ---
     #[param(name = "Gen 2 Rate", short_name = "Rate 2", range = "log(0.1, 18.0)",
-            default = 1.6, smooth = "exp(30)")]
+            default = 1.6, unit = "Hz", format = "format_rate",
+            smooth = "exp(30)")]
     pub gen_2_rate: FloatParam,
 
     #[param(name = "Gen 2 Sync", short_name = "Sync 2", default = false)]
@@ -153,6 +157,14 @@ pub struct MutanteParams {
 
 use MutanteParamsParamId as P;
 
+impl MutanteParams {
+    /// Sweep rates span 0.1–18 Hz, so they need two decimals (the stock Hz
+    /// formatter rounds to whole hertz).
+    fn format_rate(&self, value: f64) -> String {
+        format!("{value:.2} Hz")
+    }
+}
+
 /// DEPTH pot (with its 560 Ω floor resistor) as a fraction of the sweep.
 #[inline]
 fn depth_fraction(dial: f32) -> f32 {
@@ -181,6 +193,11 @@ pub struct MutanteDsp {
     pedal: PedalFollower,
     phasor_a: PhasorChannel,
     phasor_b: PhasorChannel,
+    /// The phasors and the dry/wet mix run at twice the host rate.
+    up_l: Upsampler2x,
+    up_r: Upsampler2x,
+    down_l: Downsampler2x,
+    down_r: Downsampler2x,
     sample_rate: f32,
     last_gen_1: f32,
     last_gen_2: f32,
@@ -196,8 +213,12 @@ impl Default for MutanteDsp {
             gen_1: SweepGenerator::new(sr, GenCircuit::Gen1),
             gen_2: SweepGenerator::new(sr, GenCircuit::Gen2),
             pedal: PedalFollower::new(sr),
-            phasor_a: PhasorChannel::new(sr, false),
-            phasor_b: PhasorChannel::new(sr, true),
+            phasor_a: PhasorChannel::new(2.0 * sr, false),
+            phasor_b: PhasorChannel::new(2.0 * sr, true),
+            up_l: Upsampler2x::new(),
+            up_r: Upsampler2x::new(),
+            down_l: Downsampler2x::new(),
+            down_r: Downsampler2x::new(),
             sample_rate: sr,
             last_gen_1: 0.0,
             last_gen_2: 0.0,
@@ -218,8 +239,12 @@ impl PluginLogic for Mutante {
         state.gen_1.set_sample_rate(sr);
         state.gen_2.set_sample_rate(sr);
         state.pedal.set_sample_rate(sr);
-        state.phasor_a.set_sample_rate(sr);
-        state.phasor_b.set_sample_rate(sr);
+        state.phasor_a.set_sample_rate(2.0 * sr);
+        state.phasor_b.set_sample_rate(2.0 * sr);
+        state.up_l.reset();
+        state.up_r.reset();
+        state.down_l.reset();
+        state.down_r.reset();
 
         state.gen_1.reset();
         state.gen_2.reset();
@@ -305,8 +330,8 @@ impl PluginLogic for Mutante {
 
             let (in_l, in_r) = (frame_in[0], frame_in[1]);
             let volts = VOLTS_PER_FS * in_gain;
-            let (jack_l, jack_r) = (in_l * volts, in_r * volts);
-            let jack_mono = 0.5 * (jack_l + jack_r);
+            let up_l = state.up_l.process(in_l * volts);
+            let up_r = state.up_r.process(in_r * volts);
 
             // C-100 pedal (or envelope follower driving it).
             let pedal = state.pedal.process(
@@ -344,28 +369,36 @@ impl PluginLogic for Mutante {
                     SweepSync::Rev => -src_b,
                 };
 
-            // Phasor B input switch.
-            let (out_a, out_b) = match routing {
-                PhasorBInput::InA => {
-                    let a = state.phasor_a.process(jack_mono, cv_a, fb_a, on_a);
-                    let b = state.phasor_b.process(jack_mono, cv_b, fb_b, on_b);
-                    (a, b)
-                }
-                PhasorBInput::OutA => {
-                    let a = state.phasor_a.process(jack_mono, cv_a, fb_a, on_a);
-                    let b = state.phasor_b.process(a, cv_b, fb_b, on_b);
-                    (b, b)
-                }
-                PhasorBInput::InB => {
-                    let a = state.phasor_a.process(jack_l, cv_a, fb_a, on_a);
-                    let b = state.phasor_b.process(jack_r, cv_b, fb_b, on_b);
-                    (a, b)
-                }
-            };
-
+            // Phasor B input switch, then the plugin's dry/wet mix, both at 2×.
             let to_fs = 1.0 / volts;
-            let l = ((1.0 - mix) * in_l + mix * out_a * to_fs) * out_gain;
-            let r = ((1.0 - mix) * in_r + mix * out_b * to_fs) * out_gain;
+            let (mut wet_l, mut wet_r) = ([0.0f32; 2], [0.0f32; 2]);
+            for k in 0..2 {
+                let (jack_l, jack_r) = (up_l[k], up_r[k]);
+                let (out_a, out_b) = match routing {
+                    PhasorBInput::InA => {
+                        let jack_mono = 0.5 * (jack_l + jack_r);
+                        let a = state.phasor_a.process(jack_mono, cv_a, fb_a, on_a);
+                        let b = state.phasor_b.process(jack_mono, cv_b, fb_b, on_b);
+                        (a, b)
+                    }
+                    PhasorBInput::OutA => {
+                        let jack_mono = 0.5 * (jack_l + jack_r);
+                        let a = state.phasor_a.process(jack_mono, cv_a, fb_a, on_a);
+                        let b = state.phasor_b.process(a, cv_b, fb_b, on_b);
+                        (b, b)
+                    }
+                    PhasorBInput::InB => {
+                        let a = state.phasor_a.process(jack_l, cv_a, fb_a, on_a);
+                        let b = state.phasor_b.process(jack_r, cv_b, fb_b, on_b);
+                        (a, b)
+                    }
+                };
+                wet_l[k] = ((1.0 - mix) * jack_l + mix * out_a) * to_fs;
+                wet_r[k] = ((1.0 - mix) * jack_r + mix * out_b) * to_fs;
+            }
+
+            let l = state.down_l.process(wet_l) * out_gain;
+            let r = state.down_r.process(wet_r) * out_gain;
             frame_out[0] = l;
             frame_out[1] = r;
 

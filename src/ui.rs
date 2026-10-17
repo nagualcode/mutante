@@ -314,8 +314,10 @@ fn phasor_response(f: f32, fc: f32, feedback_pos: f32, wet_on: bool, r123: f32) 
     let k_fb = ratio * R6 / (R6 + r_src);
     let w5 = 1.0 / (C5 * R6 * r_src / (R6 + r_src));
     let lp5 = Cx::ONE.div(Cx::ONE.add(s.scale(1.0 / w5)));
-    let loop_gain = lp5.mul(hp12).mul(ap6).scale(2.0 * k_fb);
-    let u = Cx::new(-1.0, 0.0).div(Cx::ONE.sub(loop_gain));
+    // Z8B: u = V+ + H4·(V+ − dry), H4 = R5‖C4 / R4.
+    let h4 = Cx::new(R5 / R4, 0.0).div(Cx::ONE.add(s.scale(R5 * C4)));
+    let loop_gain = lp5.mul(hp12).mul(ap6).scale(k_fb).mul(Cx::ONE.add(h4));
+    let u = h4.scale(-1.0).div(Cx::ONE.sub(loop_gain));
     let wet = hp12.mul(ap6).mul(u).scale(-1.0);
     let r_wet = R_PM_ON + r123 + R29;
     let k = R31 / (R31 + r_wet);
@@ -496,7 +498,6 @@ fn knob(
     accent: Color32,
     enabled: bool,
 ) {
-    let is_rate = matches!(id, P::Gen1Rate | P::Gen2Rate);
     let id: u32 = id.into();
     let hit = Rect::from_center_size(c, Vec2::splat(radius * 2.0 + 10.0));
     let resp = ui.interact(hit, egui::Id::new(("knob", id)), Sense::click_and_drag());
@@ -557,15 +558,7 @@ fn knob(
         stroke(2.0, if enabled { TEXT } else { TEXT_DIM }),
     );
 
-    let text = if active {
-        if is_rate {
-            format!("{} Hz", st.format_param(id))
-        } else {
-            st.format_param(id)
-        }
-    } else {
-        label.to_owned()
-    };
+    let text = if active { st.format_param(id) } else { label.to_owned() };
     let col = if active { accent } else { TEXT_DIM };
     p.text(c + vec2(0.0, radius + 6.0), Align2::CENTER_TOP, text, FontId::proportional(10.5), col);
 }

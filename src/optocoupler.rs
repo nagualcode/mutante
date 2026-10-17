@@ -23,8 +23,23 @@ const TAU_OFF_REF: f32 = 0.025;
 const TAU_OFF_MAX: f32 = 1.5;
 /// How strongly the darkening time constant grows as the cell gets darker.
 const TAU_OFF_SLOPE: f32 = 0.42;
+/// Largest log-conductance step (nepers) a darkening cell is driven by. A
+/// first-order law in the log domain would otherwise fall faster the further
+/// away the dark floor is; capping the drive makes the decay rate set by
+/// `tau` alone (at most `MAX_DARK_DRIVE / tau` nepers per second).
+const MAX_DARK_DRIVE: f32 = 2.5;
 /// Fixed parallel shunt conductance of each stage (5 MΩ dark cell ‖ 220 kΩ shunt).
 const G_STAGE_FLOOR: f32 = 1.0 / LDR_R_DARK + 1.0 / R_SHUNT;
+
+/// Photoconductive drive I^γ for an LED current in mA (0 when the LED is off).
+#[inline]
+fn light_power(current_ma: f32) -> f32 {
+    if current_ma > 1e-6 {
+        current_ma.powf(LDR_GAMMA)
+    } else {
+        0.0
+    }
+}
 
 #[derive(Clone, Copy)]
 struct CdsCell {
@@ -50,15 +65,11 @@ impl CdsCell {
         self.dt = 1.0 / sample_rate;
     }
 
-    /// Steady-state conductance for an LED current in mA.
+    /// Steady-state log conductance for a light level `i_pow` = I^γ
+    /// (see [`light_power`]).
     #[inline]
-    fn target_ln_g(&self, current_ma: f32) -> f32 {
-        let g = if current_ma > 1e-6 {
-            self.inv_r_at_1ma * current_ma.powf(LDR_GAMMA)
-        } else {
-            0.0
-        };
-        (g + G_FLOOR).ln()
+    fn target_ln_g(&self, i_pow: f32) -> f32 {
+        (self.inv_r_at_1ma * i_pow + G_FLOOR).ln()
     }
 
     #[inline]
@@ -69,15 +80,12 @@ impl CdsCell {
             self.ln_g += diff * (x / (1.0 + x));
         } else {
             // Recombination slows down as carrier density drops below the 1 mA
-            // reference; when brighter than 1 mA, tau starts at TAU_OFF_REF
-            // rather than shrinking below TAU_ON. Clamping the log driving
-            // step prevents the dark floor asymptote from artificially
-            // accelerating initial decay when the LED snaps off.
+            // reference. Above 1 mA the time constant is held at TAU_OFF_REF,
+            // so darkening is never faster than that, even from full light.
             let darkness = (self.ln_g_ref - self.ln_g).max(0.0);
-            let tau = (TAU_OFF_REF * (TAU_OFF_SLOPE * darkness).exp())
-                .clamp(TAU_OFF_REF, TAU_OFF_MAX);
+            let tau = (TAU_OFF_REF * (TAU_OFF_SLOPE * darkness).exp()).min(TAU_OFF_MAX);
             let x = self.dt / tau;
-            self.ln_g += diff.max(-2.5) * (x / (1.0 + x));
+            self.ln_g += diff.max(-MAX_DARK_DRIVE) * (x / (1.0 + x));
         }
     }
 
@@ -86,8 +94,8 @@ impl CdsCell {
         self.ln_g.exp()
     }
 
-    fn settle(&mut self, current_ma: f32) {
-        self.ln_g = self.target_ln_g(current_ma);
+    fn settle(&mut self, i_pow: f32) {
+        self.ln_g = self.target_ln_g(i_pow);
     }
 }
 
@@ -119,21 +127,18 @@ impl PhotoPod {
     /// the plugin does not start with a slow fade-in from darkness).
     pub fn settle(&mut self, current_ma: f32) {
         self.current_ma = current_ma;
+        let i_pow = light_power(current_ma);
         for cell in &mut self.cells {
-            cell.settle(current_ma);
+            cell.settle(i_pow);
         }
     }
 
     #[inline]
     pub fn tick(&mut self, current_ma: f32) {
         self.current_ma = current_ma;
-        let i_pow = if current_ma > 1e-6 {
-            current_ma.powf(LDR_GAMMA)
-        } else {
-            0.0
-        };
+        let i_pow = light_power(current_ma);
         for cell in &mut self.cells {
-            let t = (cell.inv_r_at_1ma * i_pow + G_FLOOR).ln();
+            let t = cell.target_ln_g(i_pow);
             cell.advance(t);
         }
     }
@@ -210,21 +215,31 @@ impl PhotoSwitch {
 mod tests {
     use super::*;
 
-    #[test]
-    fn darkening_is_slower_than_brightening() {
+    /// Time (s) for stage 0 to cover half of the octaves between two LED
+    /// currents.
+    fn half_octave_time(from_ma: f32, to_ma: f32) -> f32 {
         let sr = 48_000.0;
         let mut pod = PhotoPod::new(sr, false);
-        pod.settle(10.0);
-        let r_bright = pod.stage_resistance(0);
-        // Step LED off for 3.5 ms (one TAU_ON): resistance must not jump more than 1.5x.
-        for _ in 0..(0.0035 * sr) as usize {
-            pod.tick(0.0);
+        pod.settle(to_ma);
+        let l_end = pod.stage_resistance(0).ln();
+        pod.settle(from_ma);
+        let l_start = pod.stage_resistance(0).ln();
+        for n in 0..sr as usize {
+            pod.tick(to_ma);
+            let l = pod.stage_resistance(0).ln();
+            if (l - l_start) / (l_end - l_start) >= 0.5 {
+                return n as f32 / sr;
+            }
         }
-        let r_after_3_5ms = pod.stage_resistance(0);
-        assert!(
-            r_after_3_5ms < 1.5 * r_bright,
-            "darkened too fast: {r_bright} -> {r_after_3_5ms}"
-        );
+        f32::INFINITY
+    }
+
+    #[test]
+    fn darkening_is_slower_than_brightening() {
+        let up = half_octave_time(0.0, 16.0);
+        let down = half_octave_time(16.0, 0.0);
+        assert!(up < 0.008, "brightening took {up} s");
+        assert!(down > 2.0 * up, "darkening {down} s vs brightening {up} s");
     }
 
     #[test]
