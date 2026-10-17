@@ -5,7 +5,7 @@
 set -e
 
 echo "=========================================================="
-echo "Installing Mutante (Mu-Tron Bi-Phase Physical Emulation)"
+echo "Installing Mutante (Mu-Tron Bi-Phase emulation)"
 echo "Jardim Sonoro"
 echo "=========================================================="
 
