@@ -22,10 +22,10 @@ The **Mu-Tron Bi-Phase** (designed by Mike Beigel at Musitronics Corp., 1974) is
 
 ### From the release (recommended)
 
-1. Download `Mutante-macOS-v0.4.0.zip` from the [Releases page](https://github.com/nagualcode/mutante/releases) and unzip it.
+1. Download `Mutante-macOS-arm64-v0.4.1.zip` from the [Releases page](https://github.com/nagualcode/mutante/releases) and unzip it. Windows (`Mutante-Windows-x86_64-v0.4.1.zip`) and Linux (`Mutante-Linux-x86_64-v0.4.1.tar.gz`) builds are published alongside it; unzip and copy the bundles into your host's CLAP / VST3 folders.
 2. In Terminal, run the installer from the unzipped folder:
    ```bash
-   cd ~/Downloads/Mutante-macOS-v0.4.0
+   cd ~/Downloads/Mutante-macOS-arm64-v0.4.1
    ./install.sh
    ```
    It copies the plug-ins into your user plug-in folders (no admin password required) and clears the macOS Gatekeeper quarantine flag:
