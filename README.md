@@ -1,3 +1,7 @@
+<a class="bmc" href="https://buymeacoffee.com/jardimsonoro" rel="noopener">
+    <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" width="217" height="60" loading="lazy">
+</a>
+
 # Mutante · Mu-Tron Bi-Phase Emulation
 
 > **Jardim Sonoro** · CLAP / VST3 / AU · macOS (Apple Silicon) · Rust + [Truce](https://github.com/truce-audio/truce) 6.3
